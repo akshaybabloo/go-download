@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 
+	"github.com/urfave/cli/v3"
+
 	"github.com/akshaybabloo/go-download"
-	"github.com/urfave/cli/v2"
 )
 
 // Config represents the JSON configuration file structure
@@ -34,7 +36,7 @@ type Config struct {
 }
 
 func main() {
-	app := &cli.App{
+	app := &cli.Command{
 		Name:  "gdl",
 		Usage: "Download multiple files asynchronously",
 		Flags: []cli.Flag{
@@ -115,7 +117,8 @@ func main() {
 				Usage: "Path to JSON configuration file",
 			},
 		},
-		Action: func(c *cli.Context) error {
+
+		Action: func(cli context.Context, c *cli.Command) error {
 			d := download.NewDownload()
 
 			// Load from config file if specified
@@ -236,7 +239,7 @@ func main() {
 		},
 	}
 
-	err := app.Run(os.Args)
+	err := app.Run(context.Background(), os.Args)
 	if err != nil {
 		log.Fatal(err)
 	}
