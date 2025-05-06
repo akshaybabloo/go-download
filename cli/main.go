@@ -13,6 +13,8 @@ import (
 	"github.com/akshaybabloo/go-download"
 )
 
+var version = "dev"
+
 // Config represents the JSON configuration file structure
 type Config struct {
 	URLs            []string          `json:"urls"`
@@ -249,6 +251,8 @@ func main() {
 			return nil
 		},
 	}
+
+	app.Version = version
 
 	err := app.Run(context.Background(), os.Args)
 	if err != nil {
