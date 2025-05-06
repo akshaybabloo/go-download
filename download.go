@@ -98,7 +98,7 @@ func NewDownload(options ...*Options) *Options {
 		Retry:             3,
 		ShowProgress:      false,
 		DownloadPath:      ".",
-		Parallel:          1,
+		Parallel:          5,
 		Timeout:           10000,
 		Title:             "",
 		ResumeDownload:    false,
@@ -315,7 +315,6 @@ func (o *Options) downloadParallelWithProgress() error {
 
 				// Set timeout
 				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout)*time.Second)
-				defer cancel()
 				req = req.WithContext(ctx)
 
 				// Perform the request with retries
@@ -331,7 +330,9 @@ func (o *Options) downloadParallelWithProgress() error {
 					}
 				}
 
+				// Handle the response and clean up
 				if respErr != nil {
+					cancel() // Cancel the context before continuing
 					sizeErrors <- respErr
 					continue
 				}
@@ -349,7 +350,12 @@ func (o *Options) downloadParallelWithProgress() error {
 					sizeErrors <- fmt.Errorf("unexpected status code for HEAD request: %d", resp.StatusCode)
 				}
 
-				resp.Body.Close()
+				if resp != nil && resp.Body != nil {
+					resp.Body.Close()
+				}
+
+				// Cancel the context after we're done with it
+				cancel()
 			}
 		}()
 	}
@@ -513,11 +519,12 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 	filepath := path.Join(downloadDir, filename)
 
 	// Check if the URL is valid and the file exists on the server before creating a local file
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout)*time.Second)
-	defer cancel()
+	// Use a separate context for the HEAD request
+	headCtx, headCancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout)*time.Second)
+	defer headCancel()
 
 	// Create a HEAD request to check if the file exists
-	headReq, err := http.NewRequestWithContext(ctx, "HEAD", u, nil)
+	headReq, err := http.NewRequestWithContext(headCtx, "HEAD", u, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create HEAD request: %w", err)
 	}
@@ -544,9 +551,15 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 	if headErr != nil {
 		return fmt.Errorf("failed to check file existence after %d retries: %w", o.Retry, headErr)
 	}
-	defer headResp.Body.Close()
+	if headResp != nil {
+		defer headResp.Body.Close()
+	}
 
 	// Check if the file exists on the server
+	if headResp == nil {
+		return fmt.Errorf("no response received from server")
+	}
+
 	if headResp.StatusCode != http.StatusOK && headResp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("file not found on server, status code: %d", headResp.StatusCode)
 	}
@@ -594,8 +607,13 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 	}
 	defer file.Close()
 
+	// Create a new context with a longer timeout for the actual download
+	// This helps prevent "context deadline exceeded" errors during large downloads
+	downloadCtx, downloadCancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout*10)*time.Second)
+	defer downloadCancel()
+
 	// Create GET request for actual download
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req, err := http.NewRequestWithContext(downloadCtx, "GET", u, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -623,6 +641,9 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 	}
 	if err != nil {
 		return fmt.Errorf("failed to download after %d retries: %w", o.Retry, err)
+	}
+	if resp == nil {
+		return fmt.Errorf("no response received from server")
 	}
 	defer resp.Body.Close()
 
@@ -734,7 +755,9 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open file for checksum verification: %w", err)
 	}
-	defer file.Close()
+	if file != nil {
+		defer file.Close()
+	}
 
 	var h hash.Hash
 
@@ -751,6 +774,10 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 	}
 
 	// Calculate the hash
+	if file == nil {
+		return fmt.Errorf("file is nil, cannot calculate checksum")
+	}
+
 	if _, err := io.Copy(h, file); err != nil {
 		return fmt.Errorf("failed to read file for checksum calculation: %w", err)
 	}
