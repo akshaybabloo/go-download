@@ -62,7 +62,7 @@ func main() {
 				Name:    "parallel",
 				Aliases: []string{"p"},
 				Usage:   "Number of parallel downloads",
-				Value:   1,
+				Value:   5,
 			},
 			&cli.BoolFlag{
 				Name:  "progress",
