@@ -5,7 +5,7 @@ go 1.23.0
 require (
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/urfave/cli/v3 v3.2.0
-	github.com/vbauerster/mpb/v8 v8.9.3
+	github.com/vbauerster/mpb/v8 v8.10.0
 	golang.org/x/time v0.11.0
 )
 
