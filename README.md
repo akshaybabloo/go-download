@@ -13,6 +13,7 @@ CLI and SDK to download multiple files asynchronously with advanced features lik
 - Checksum verification (MD5, SHA1, SHA256)
 - Configurable retries and timeouts
 - JSON configuration file support
+- File-based URL input
 
 ## Installation
 
@@ -90,6 +91,22 @@ Example configuration file:
     "https://example.com/file1.zip": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 }
+```
+
+#### Using a File with URLs
+
+You can also use a file containing URLs to download:
+
+```bash
+gdl --file urls.txt --output /path/to/output/directory --parallel 5
+```
+
+Where `urls.txt` contains:
+
+```
+https://example.com/file1.txt
+https://example.com/file2.txt
+https://example.com/file3.txt
 ```
 
 ### SDK

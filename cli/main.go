@@ -116,6 +116,10 @@ func main() {
 				Name:  "config",
 				Usage: "Path to JSON configuration file",
 			},
+			&cli.StringFlag{
+				Name:  "file",
+				Usage: "Path to a file containing URLs (one per line)",
+			},
 		},
 
 		Action: func(cli context.Context, c *cli.Command) error {
@@ -128,7 +132,14 @@ func main() {
 				}
 			}
 
-			// Command line flags override config file
+			// Load URLs from file if specified (overrides config file URLs)
+			if filePath := c.String("file"); filePath != "" {
+				if err := loadFile(filePath, d); err != nil {
+					return fmt.Errorf("failed to load URLs from file: %w", err)
+				}
+			}
+
+			// Command line flags override config file and file URLs
 
 			// Set URLs
 			urls := c.StringSlice("url")
@@ -224,7 +235,7 @@ func main() {
 			}
 
 			// Validate URLs
-			if len(urls) == 0 && c.String("config") == "" {
+			if len(urls) == 0 && c.String("config") == "" && c.String("file") == "" {
 				return fmt.Errorf("no URLs specified")
 			}
 
@@ -317,6 +328,29 @@ func loadConfig(path string, d *download.Options) error {
 	// Set expected checksums
 	for url, checksum := range config.ExpectedChecksums {
 		d.SetExpectedChecksum(url, checksum)
+	}
+
+	return nil
+}
+
+// loadFile loads URLs from a file
+func loadFile(path string, d *download.Options) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	// Split by newline and filter out empty lines
+	var urls []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			urls = append(urls, line)
+		}
+	}
+
+	if len(urls) > 0 {
+		d.SetURLs(urls)
 	}
 
 	return nil
