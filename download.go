@@ -736,27 +736,27 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 	}
 	defer file.Close()
 
-	var hash hash.Hash
+	var h hash.Hash
 
 	// Create the appropriate hasher
 	switch algorithm {
 	case "md5":
-		hash = md5.New()
+		h = md5.New()
 	case "sha1":
-		hash = sha1.New()
+		h = sha1.New()
 	case "sha256":
-		hash = sha256.New()
+		h = sha256.New()
 	default:
 		return fmt.Errorf("unsupported hash algorithm: %s", algorithm)
 	}
 
 	// Calculate the hash
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(h, file); err != nil {
 		return fmt.Errorf("failed to read file for checksum calculation: %w", err)
 	}
 
 	// Compare the checksums
-	calculatedChecksum := hex.EncodeToString(hash.Sum(nil))
+	calculatedChecksum := hex.EncodeToString(h.Sum(nil))
 	if calculatedChecksum != checksum {
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", checksum, calculatedChecksum)
 	}
