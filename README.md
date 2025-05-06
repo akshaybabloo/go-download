@@ -2,6 +2,23 @@
 
 CLI and SDK to download multiple files asynchronously with advanced features like resume support, bandwidth limiting, and checksum verification.
 
+**Table of Contents**
+
+- [Go Download](#go-download)
+  - [Features](#features)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [CLI](#cli)
+      - [Using a Configuration File](#using-a-configuration-file)
+      - [Using a File with URLs](#using-a-file-with-urls)
+    - [SDK](#sdk)
+  - [Advanced Features](#advanced-features)
+    - [Resume Downloads](#resume-downloads)
+    - [Bandwidth Limiting](#bandwidth-limiting)
+    - [Checksum Verification](#checksum-verification)
+    - [Authentication](#authentication)
+  - [License](#license)
+
 ## Features
 
 - Download multiple files in parallel
