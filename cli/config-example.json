@@ -1,0 +1,32 @@
+{
+  "urls": [
+    "https://example.com/file1.zip",
+    "https://example.com/file2.pdf"
+  ],
+  "output": "./downloads",
+  "title": "my-downloads",
+  "parallel": 2,
+  "show_progress": true,
+  "resume_download": true,
+  "bandwidth_limit": 500,
+  "timeout": 30,
+  "retry": 3,
+  "headers": {
+    "User-Agent": "Go-Download-Client/1.0",
+    "Accept": "*/*"
+  },
+  "custom_filenames": {
+    "https://example.com/file1.zip": "custom-name-file1.zip",
+    "https://example.com/file2.pdf": "custom-name-file2.pdf"
+  },
+  "basic_auth": {
+    "username": "user",
+    "password": "pass"
+  },
+  "bearer_token": "your-token-here",
+  "verify_checksum": true,
+  "expected_checksums": {
+    "https://example.com/file1.zip": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "https://example.com/file2.pdf": "md5:d41d8cd98f00b204e9800998ecf8427e"
+  }
+}
