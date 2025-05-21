@@ -1,6 +1,6 @@
 //go:build example
 
-package example
+package main
 
 import (
 	"fmt"

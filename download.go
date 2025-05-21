@@ -93,7 +93,7 @@ func NewDownload(options ...*Options) *Options {
 		return options
 	}
 
-	opt := &Options{
+	return &Options{
 		Headers:           map[string]string{},
 		Retry:             3,
 		ShowProgress:      false,
@@ -107,7 +107,6 @@ func NewDownload(options ...*Options) *Options {
 		VerifyChecksum:    false,
 		ExpectedChecksums: make(map[string]string),
 	}
-	return opt
 }
 
 // SetURLs sets the URLs to be downloaded
@@ -226,16 +225,53 @@ func (o *Options) downloadSerial() error {
 	// Serial download with progress bars
 	var wg sync.WaitGroup
 	p := mpb.New(mpb.WithWaitGroup(&wg))
+	totalFiles := len(o.urls)
+
+	overallBar := p.AddBar(int64(totalFiles),
+		mpb.PrependDecorators(
+			decor.Name("Overall Progress: ", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+			decor.CountersNoUnit("%d / %d files", decor.WCSyncWidth),
+		),
+		mpb.AppendDecorators(
+			decor.Percentage(decor.WCSyncWidth),
+		),
+	)
 
 	for _, u := range o.urls {
 		parsedURL, _ := url.Parse(u)
 		filename := path.Base(parsedURL.Path)
-
-		bar := o.newProgress(p, 0, filename)
-
-		if err := o.downloadFile(u, bar); err != nil {
-			return err
+		if filename == "" || filename == "." {
+			filename = "download"
 		}
+
+		var fileSize int64
+		headResp, headErr := http.Head(u)
+		if headErr == nil && headResp.StatusCode == http.StatusOK {
+			fileSize = headResp.ContentLength
+			if headResp.Body != nil {
+				headResp.Body.Close()
+			}
+		}
+
+		fileBar := o.newIndividualProgress(p, fileSize, filename)
+
+		err := o.downloadFile(u, fileBar)
+		if err != nil {
+			if fileBar != nil {
+				fileBar.Abort(true)
+			}
+			if o.Log != nil {
+				o.Log.Printf("Error downloading %s: %v", u, err)
+			}
+		}
+		if fileBar != nil && !fileBar.Completed() && !fileBar.Aborted() {
+			if fileSize > 0 {
+				fileBar.SetCurrent(fileSize)
+			}
+			fileBar.SetTotal(fileBar.Current(), true)
+		}
+
+		overallBar.Increment()
 	}
 
 	p.Wait()
@@ -280,48 +316,49 @@ func (o *Options) downloadParallelSimple() error {
 func (o *Options) downloadParallelWithProgress() error {
 	var wg sync.WaitGroup
 	p := mpb.New(mpb.WithWaitGroup(&wg))
-	errors := make(chan error, len(o.urls))
+	totalFiles := len(o.urls)
+	errors := make(chan error, totalFiles)
 
-	// Get file sizes in parallel
+	overallBar := p.AddBar(int64(totalFiles),
+		mpb.PrependDecorators(
+			decor.Name("Overall Progress: ", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+			decor.CountersNoUnit("%d / %d files", decor.WCSyncWidth),
+		),
+		mpb.AppendDecorators(
+			decor.Percentage(decor.WCSyncWidth),
+		),
+	)
+
+	// Get file sizes in parallel (existing logic, slightly adapted)
 	sizes := make(map[string]int64)
 	var sizesMutex sync.Mutex
 	var sizeWg sync.WaitGroup
-	sizeErrors := make(chan error, len(o.urls))
+	sizeErrors := make(chan error, totalFiles)
+	headJobs := make(chan string, totalFiles)
 
-	// Create a channel for HEAD request jobs
-	headJobs := make(chan string, len(o.urls))
-
-	// Start workers for HEAD requests
-	workerCount := o.Parallel
-	if workerCount > len(o.urls) {
-		workerCount = len(o.urls)
+	headWorkerCount := min(o.Parallel, totalFiles)
+	if headWorkerCount == 0 && totalFiles > 0 {
+		headWorkerCount = 1
 	}
 
-	for i := 0; i < workerCount; i++ {
+	for range headWorkerCount {
 		sizeWg.Add(1)
 		go func() {
 			defer sizeWg.Done()
 			for u := range headJobs {
 				req, err := http.NewRequest("HEAD", u, nil)
 				if err != nil {
-					sizeErrors <- err
+					sizeErrors <- fmt.Errorf("failed to create HEAD request for %s: %w", u, err)
 					continue
 				}
-
-				// Add headers
 				for k, v := range o.Headers {
 					req.Header.Add(k, v)
 				}
-
-				// Set timeout
 				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout)*time.Second)
-				req = req.WithContext(ctx)
-
-				// Perform the request with retries
 				var resp *http.Response
 				var respErr error
 				for j := 0; j <= o.Retry; j++ {
-					resp, respErr = http.DefaultClient.Do(req)
+					resp, respErr = http.DefaultClient.Do(req.WithContext(ctx))
 					if respErr == nil {
 						break
 					}
@@ -329,134 +366,135 @@ func (o *Options) downloadParallelWithProgress() error {
 						time.Sleep(time.Second * time.Duration(j+1))
 					}
 				}
+				cancel()
 
-				// Handle the response and clean up
 				if respErr != nil {
-					cancel() // Cancel the context before continuing
-					sizeErrors <- respErr
+					sizeErrors <- fmt.Errorf("HEAD request for %s failed after %d retries: %w", u, o.Retry, respErr)
 					continue
 				}
 
-				// Store the content length
 				if resp.StatusCode == http.StatusOK {
 					sizesMutex.Lock()
-					if resp.ContentLength > 0 {
-						sizes[u] = resp.ContentLength
-					} else {
-						sizes[u] = 0
-					}
+					sizes[u] = resp.ContentLength
 					sizesMutex.Unlock()
+				} else if resp.StatusCode != http.StatusNotFound {
+					sizeErrors <- fmt.Errorf("unexpected status code %d for HEAD request: %s", resp.StatusCode, u)
 				} else {
-					sizeErrors <- fmt.Errorf("unexpected status code for HEAD request: %d", resp.StatusCode)
+					sizesMutex.Lock()
+					sizes[u] = -1
+					sizesMutex.Unlock()
 				}
-
-				if resp != nil && resp.Body != nil {
+				if resp.Body != nil {
 					resp.Body.Close()
 				}
-
-				// Cancel the context after we're done with it
-				cancel()
 			}
 		}()
 	}
 
-	// Queue HEAD jobs
 	for _, u := range o.urls {
 		headJobs <- u
 	}
 	close(headJobs)
 
-	// Wait for HEAD requests to complete
-	go func() {
-		sizeWg.Wait()
-		close(sizeErrors)
-	}()
+	sizeWg.Wait()
+	close(sizeErrors)
 
-	// Check for errors from HEAD requests
 	for err := range sizeErrors {
 		if err != nil {
-			return err
+			if o.Log != nil {
+				o.Log.Printf("Warning during size fetch: %v", err)
+			}
 		}
 	}
 
-	// Create a channel for jobs
-	jobs := make(chan downloadJob, len(o.urls))
+	// Create a channel for download jobs
+	downloadJobs := make(chan struct {
+		url  string
+		size int64
+	}, totalFiles)
 
-	// Start limited number of workers
-	for i := 0; i < o.Parallel; i++ {
+	// Populate download jobs
+	for _, u := range o.urls {
+		downloadJobs <- struct {
+			url  string
+			size int64
+		}{url: u, size: sizes[u]}
+	}
+	close(downloadJobs)
+
+	// Start limited number of workers for actual downloads
+	actualParallel := min(o.Parallel, totalFiles)
+	if actualParallel == 0 && totalFiles > 0 {
+		actualParallel = 1
+	}
+
+	for range actualParallel {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for job := range jobs {
-				if err := o.downloadFile(job.url, job.bar); err != nil {
-					job.bar.Abort(true)
-					errors <- err
+			for job := range downloadJobs {
+				parsedURL, _ := url.Parse(job.url)
+				filename := path.Base(parsedURL.Path)
+				if filename == "" || filename == "." {
+					filename = "download"
 				}
+
+				fileBar := o.newIndividualProgress(p, job.size, filename)
+
+				err := o.downloadFile(job.url, fileBar)
+				if err != nil {
+					if fileBar != nil {
+						fileBar.Abort(true)
+					}
+					errors <- fmt.Errorf("failed to download %s: %w", job.url, err)
+				} else {
+					if fileBar != nil && !fileBar.Completed() && !fileBar.Aborted() {
+						currentSize := fileBar.Current()
+						if job.size > 0 && currentSize < job.size {
+							fileBar.SetCurrent(job.size)
+						}
+						fileBar.SetTotal(fileBar.Current(), true)
+					}
+				}
+				overallBar.Increment()
 			}
 		}()
 	}
 
-	// Queue jobs
-	for _, u := range o.urls {
-		parsedURL, _ := url.Parse(u)
-		filename := path.Base(parsedURL.Path)
-		bar := o.newProgress(p, int(sizes[u]), filename)
-		jobs <- downloadJob{
-			url: u,
-			bar: bar,
-		}
-	}
-	close(jobs)
-
-	// Use a channel to signal completion
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	// Wait for either completion or error
-	var lastErr error
-	remaining := len(o.urls)
-
-	for remaining > 0 {
-		select {
-		case err := <-errors:
-			if err != nil {
-				lastErr = err
-			}
-			remaining--
-		case <-done:
-			remaining = 0
-		}
-	}
+	p.Wait()
 
 	close(errors)
+
+	var lastErr error
+	for err := range errors {
+		if err != nil {
+			if o.Log != nil {
+				o.Log.Println(err)
+			}
+			if lastErr == nil {
+				lastErr = err
+			}
+		}
+	}
 	return lastErr
 }
 
-// downloadJob represents a download task
-type downloadJob struct {
-	url string
-	bar *mpb.Bar
-}
-
-func (o *Options) newProgress(p *mpb.Progress, size int, name string) *mpb.Bar {
-	return p.AddBar(int64(size),
+// newIndividualProgress creates a progress bar for an individual file download
+func (o *Options) newIndividualProgress(p *mpb.Progress, size int64, name string) *mpb.Bar {
+	if size < 0 {
+		size = 0
+	}
+	return p.AddBar(size,
 		mpb.BarFillerClearOnComplete(),
 		mpb.PrependDecorators(
 			decor.Name(name+": ", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
-			decor.OnComplete(
-				decor.CountersKibiByte("% .2f / % .2f"), "done!",
-			),
+			decor.CountersKibiByte("% .2f / % .2f"),
 		),
 		mpb.AppendDecorators(
-			decor.OnComplete(
-				decor.EwmaSpeed(decor.SizeB1024(2), "% .2f", 60), "",
-			),
-			decor.OnComplete(
-				decor.EwmaETA(decor.ET_STYLE_GO, 60), "",
-			),
+			decor.Percentage(decor.WCSyncWidth),
+			decor.EwmaSpeed(decor.SizeB1024(0), "% .2f/s", 60),
+			decor.Name(" ETA: ", decor.WCSyncWidth),
+			decor.EwmaETA(decor.ET_STYLE_GO, 60, decor.WCSyncWidth),
 		),
 	)
 }
@@ -492,19 +530,16 @@ func (o *Options) SetBearerToken(token string) {
 }
 
 func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
-	// Create the download directory if it doesn't exist
 	downloadDir := path.Join(o.DownloadPath, o.Title)
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		return fmt.Errorf("failed to create download directory: %w", err)
 	}
 
-	// Parse the URL to get a safe filename
 	parsedURL, err := url.Parse(u)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// Use custom filename if provided, otherwise use the one from the URL
 	var filename string
 	if customName, ok := o.CustomFilenames[u]; ok && customName != "" {
 		filename = customName
@@ -515,26 +550,20 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 		}
 	}
 
-	// Full path to the file
 	filepath := path.Join(downloadDir, filename)
 
-	// Check if the URL is valid and the file exists on the server before creating a local file
-	// Use a separate context for the HEAD request
 	headCtx, headCancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout)*time.Second)
 	defer headCancel()
 
-	// Create a HEAD request to check if the file exists
 	headReq, err := http.NewRequestWithContext(headCtx, "HEAD", u, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create HEAD request: %w", err)
 	}
 
-	// Add headers to HEAD request
 	for k, v := range o.Headers {
 		headReq.Header.Add(k, v)
 	}
 
-	// Perform the HEAD request with retries
 	var headResp *http.Response
 	var headErr error
 	for i := 0; i <= o.Retry; i++ {
@@ -547,7 +576,6 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 		}
 	}
 
-	// Check if HEAD request was successful
 	if headErr != nil {
 		return fmt.Errorf("failed to check file existence after %d retries: %w", o.Retry, headErr)
 	}
@@ -555,7 +583,6 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 		defer headResp.Body.Close()
 	}
 
-	// Check if the file exists on the server
 	if headResp == nil {
 		return fmt.Errorf("no response received from server")
 	}
@@ -564,42 +591,32 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 		return fmt.Errorf("file not found on server, status code: %d", headResp.StatusCode)
 	}
 
-	// Get file size from HEAD response
 	contentLength := headResp.ContentLength
 
-	// Check if file exists locally and we should resume
 	var file *os.File
 	var fileSize int64
 
 	if o.ResumeDownload {
-		// Check if file exists and get its size
 		fileInfo, err := os.Stat(filepath)
 		if err == nil && fileInfo.Size() > 0 {
-			// File exists and has content
 			fileSize = fileInfo.Size()
-
-			// If the local file is already the same size as the remote file, we're done
 			if contentLength > 0 && fileSize >= contentLength {
 				if bar != nil {
 					bar.SetTotal(contentLength, true)
 				}
 				return nil
 			}
-
-			// Open file for appending
 			file, err = os.OpenFile(filepath, os.O_APPEND|os.O_WRONLY, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to open file for resuming: %w", err)
 			}
 		} else {
-			// File doesn't exist or is empty, create new
 			file, err = os.Create(filepath)
 			if err != nil {
 				return fmt.Errorf("failed to create file: %w", err)
 			}
 		}
 	} else {
-		// Always create a new file if not resuming
 		file, err = os.Create(filepath)
 		if err != nil {
 			return fmt.Errorf("failed to create file: %w", err)
@@ -607,28 +624,22 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 	}
 	defer file.Close()
 
-	// Create a new context with a longer timeout for the actual download
-	// This helps prevent "context deadline exceeded" errors during large downloads
 	downloadCtx, downloadCancel := context.WithTimeout(context.Background(), time.Duration(o.Timeout*10)*time.Second)
 	defer downloadCancel()
 
-	// Create GET request for actual download
 	req, err := http.NewRequestWithContext(downloadCtx, "GET", u, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add headers
 	for k, v := range o.Headers {
 		req.Header.Add(k, v)
 	}
 
-	// Add Range header if resuming
 	if o.ResumeDownload && fileSize > 0 {
 		req.Header.Add("Range", fmt.Sprintf("bytes=%d-", fileSize))
 	}
 
-	// Perform the request with retries
 	var resp *http.Response
 	for i := 0; i <= o.Retry; i++ {
 		resp, err = http.DefaultClient.Do(req)
@@ -647,12 +658,9 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 	}
 	defer resp.Body.Close()
 
-	// Check response
 	if o.ResumeDownload && fileSize > 0 {
 		if resp.StatusCode != http.StatusPartialContent {
-			// If the server doesn't support range requests, start over
 			if resp.StatusCode == http.StatusOK {
-				// Close and recreate the file
 				file.Close()
 				file, err = os.Create(filepath)
 				if err != nil {
@@ -667,44 +675,50 @@ func (o *Options) downloadFile(u string, bar *mpb.Bar) error {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	// Calculate total size for progress bar
 	totalSize := resp.ContentLength
 	if o.ResumeDownload && resp.StatusCode == http.StatusPartialContent {
-		// For resumed downloads, add the existing file size to the content length
 		totalSize += fileSize
 	}
 
-	// Update progress bar if provided
-	if bar != nil && totalSize > 0 {
-		bar.SetTotal(totalSize, false)
+	var actualReader io.ReadCloser = resp.Body
+	if bar != nil {
+		if totalSize > 0 {
+			bar.SetTotal(totalSize, false)
+		}
 		if fileSize > 0 {
 			bar.SetCurrent(fileSize)
 		}
+		actualReader = bar.ProxyReader(resp.Body)
 	}
 
-	// Use progress bar if provided
-	reader := resp.Body
-	if bar != nil {
-		reader = bar.ProxyReader(resp.Body)
-		defer reader.Close()
-	}
-
-	// Apply bandwidth limit if set
 	if o.BandwidthLimit > 0 {
-		// Convert KB/s to bytes per second
 		bytesPerSecond := int64(o.BandwidthLimit * 1024)
-		reader = &rateLimitedReader{
-			r:       reader,
+		actualReader = &rateLimitedReader{
+			r:       actualReader,
 			limiter: rate.NewLimiter(rate.Limit(bytesPerSecond), int(bytesPerSecond)),
 		}
 	}
 
-	_, err = io.Copy(file, reader)
+	_, err = io.Copy(file, actualReader)
+	if actualReaderCloser, ok := actualReader.(io.Closer); ok {
+		actualReaderCloser.Close()
+	}
+
 	if err != nil {
+		if bar != nil {
+			bar.Abort(true)
+		}
 		return fmt.Errorf("failed to save file: %w", err)
 	}
 
-	// Verify checksum if enabled
+	if bar != nil {
+		if !bar.Completed() {
+			bar.SetTotal(bar.Current(), true)
+		} else if bar.Completed() && totalSize > 0 {
+			bar.SetTotal(totalSize, true)
+		}
+	}
+
 	if o.VerifyChecksum {
 		if expectedChecksum, ok := o.ExpectedChecksums[u]; ok && expectedChecksum != "" {
 			if err := o.verifyFileChecksum(filepath, expectedChecksum); err != nil {
@@ -741,7 +755,6 @@ func (r *rateLimitedReader) Close() error {
 
 // verifyFileChecksum verifies the checksum of a file
 func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
-	// Parse the checksum format "algorithm:checksum"
 	parts := strings.SplitN(expectedChecksum, ":", 2)
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid checksum format, expected 'algorithm:checksum'")
@@ -750,7 +763,6 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 	algorithm := strings.ToLower(parts[0])
 	checksum := parts[1]
 
-	// Open the file
 	file, err := os.Open(filepath)
 	if err != nil {
 		return fmt.Errorf("failed to open file for checksum verification: %w", err)
@@ -761,7 +773,6 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 
 	var h hash.Hash
 
-	// Create the appropriate hasher
 	switch algorithm {
 	case "md5":
 		h = md5.New()
@@ -773,7 +784,6 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 		return fmt.Errorf("unsupported hash algorithm: %s", algorithm)
 	}
 
-	// Calculate the hash
 	if file == nil {
 		return fmt.Errorf("file is nil, cannot calculate checksum")
 	}
@@ -782,7 +792,6 @@ func (o *Options) verifyFileChecksum(filepath, expectedChecksum string) error {
 		return fmt.Errorf("failed to read file for checksum calculation: %w", err)
 	}
 
-	// Compare the checksums
 	calculatedChecksum := hex.EncodeToString(h.Sum(nil))
 	if calculatedChecksum != checksum {
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", checksum, calculatedChecksum)
