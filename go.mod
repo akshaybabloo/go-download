@@ -1,12 +1,12 @@
 module github.com/akshaybabloo/go-download
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/urfave/cli/v3 v3.3.3
 	github.com/vbauerster/mpb/v8 v8.10.1
-	golang.org/x/time v0.11.0
+	golang.org/x/time v0.14.0
 )
 
 require (
